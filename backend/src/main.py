@@ -8,9 +8,13 @@ from src.config.settings import SEED_DEMO,REDIS_URL
 from src.models import *
 from src.middlewares.request_id import RequestIDMiddleware
 from src.middlewares.errors import ErrorMiddleware
-from src.routes import auth,datasets,runs,policies,reviews,audit
+from src.routes import auth,datasets,runs,policies,reviews,audit,raw
 @asynccontextmanager
 async def lifespan(app):
+ # Startup only creates missing tables; existing installations gain the raw
+ # sampling tables without touching their window/training data.  The two
+ # nullable columns added to sensor_windows (pipe_id, window_start) do need an
+ # explicit ALTER TABLE on a database created before this feature.
  Base.metadata.create_all(engine)
  if SEED_DEMO:
   try:
@@ -20,7 +24,7 @@ async def lifespan(app):
  yield
 app=FastAPI(title='澄湾管网漏损判别席',lifespan=lifespan)
 app.add_middleware(ErrorMiddleware);app.add_middleware(RequestIDMiddleware)
-for route in (auth,datasets,runs,policies,reviews,audit):app.include_router(route.router)
+for route in (auth,datasets,runs,policies,reviews,audit,raw):app.include_router(route.router)
 @app.get('/health')
 def health():
  with engine.connect() as c:c.execute(text('select 1'))

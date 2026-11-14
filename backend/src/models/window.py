@@ -1,5 +1,6 @@
+from datetime import datetime
 from sqlalchemy.orm import Mapped,mapped_column
-from sqlalchemy import String,JSON,Integer,ForeignKey,UniqueConstraint
+from sqlalchemy import String,JSON,Integer,ForeignKey,UniqueConstraint,DateTime
 from src.config.database import Base
 class SensorWindow(Base):
  __tablename__='sensor_windows'
@@ -9,3 +10,5 @@ class SensorWindow(Base):
  reference:Mapped[str]=mapped_column(String(80))
  features:Mapped[dict]=mapped_column(JSON)
  label:Mapped[int]=mapped_column(Integer)
+ pipe_id:Mapped[str|None]=mapped_column(String(60),nullable=True)
+ window_start:Mapped[datetime|None]=mapped_column(DateTime(timezone=True),nullable=True)

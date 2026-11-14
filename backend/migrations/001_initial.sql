@@ -4,3 +4,29 @@
 -- Natural keys: users.email, window_datasets.name,
 -- sensor_windows(dataset_id,reference), inspection_reviews(policy_id,window_id).
 -- Production schema changes require explicit migration planning.
+
+-- Raw field samples (see models/raw.py).  Raw samples are keyed by
+-- (raw_dataset_id, pipe_id, sampled_at); that natural key is what makes
+-- re-uploads idempotent regardless of batch bounds or upload order.
+--   raw_datasets(id, name unique, filename, description, created_at)
+--   raw_samples(id, raw_dataset_id fk, pipe_id, sampled_at timestamptz,
+--               flow, pressure, acoustic_energy, temperature, pipe_age, leak,
+--               unique(raw_dataset_id, pipe_id, sampled_at))
+--   raw_upload_batches(id, raw_dataset_id fk, upload_key nullable,
+--               checksum, received, inserted, deduplicated, created_at,
+--               unique(raw_dataset_id, upload_key))
+--   window_builds(id, raw_dataset_id fk, name, status, error,
+--               window_dataset_id fk nullable, sample_count, pipe_count,
+--               window_count, memory_limit_bytes, chunk_rows,
+--               peak_estimated_bytes, summary json, created_at, completed_at)
+--   generated_windows(id, build_id fk, seq, pipe_id, window_start,
+--               reference, features json, label, samples, minute_slots,
+--               unique(build_id, reference))
+-- sensor_windows also gains nullable pipe_id / window_start for windows that
+-- came from a build; imported windows leave them null.
+
+-- Upgrade for databases created before raw sampling existed:
+--   ALTER TABLE sensor_windows ADD COLUMN pipe_id varchar(60);
+--   ALTER TABLE sensor_windows ADD COLUMN window_start timestamptz;
+-- New tables are created by SQLAlchemy metadata at startup; the columns above
+-- are not, so they must be added explicitly once.

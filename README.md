@@ -24,7 +24,8 @@ docker compose exec -T backend python -m scripts.seed_demo
 ## 工作剧本
 
 1. 07:00 周沅以analyst登录，核对 `cw-pressure-windows.csv` 的1500窗口/350阳性。
-2. 在“窗口样本”看前100个匿名工况；label独立显示，永不进入特征矩阵。
+2. 现场乱序采样先建“原始采样集”，分任意批次上传；在“窗口样本”页核对批次台账、去重计数与前100条采样，再按管段+UTC整分钟起点生成五分钟滑动窗口。
+3. 在“窗口样本”看前100个匿名工况；label独立显示，永不进入特征矩阵。原窗口导入保留，生成的窗口与导入的窗口在同一个数据集列表中。
 3. 建立“夜间漏损成本研究”，选择全部六特征，同时比较前三个特征的精简候选，C为0.1、1、10。
 4. 在看任何最终留出结果前，确定漏报成本8、误报成本1，提交独立Celery队列。
 5. worker在训练集内部做分层三折CV，Pipeline每折单独拟合StandardScaler，再拟合Logistic。
@@ -35,7 +36,19 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 ## 数据和模型口径
 
-五个核心实体：WindowDataset、SensorWindow、TrainingRun、ThresholdPolicy、InspectionReview，分别经过数据库模型、Pydantic schema、service、route/API、store与页面。六个页面为判别席、窗口样本、训练配置、封存结果、阈值与复核、研究留痕。PerformanceSummary、CurvePlot、RunTable等业务组件跨页复用；同时有共享表格、Badge、Notice、Empty。
+五个核心实体：WindowDataset、SensorWindow、TrainingRun、ThresholdPolicy、InspectionReview，分别经过数据库模型、Pydantic schema、service、route/API、store与页面。原始采样另有RawDataset、RawSample、RawUploadBatch、WindowBuild、GeneratedWindow五个实体。六个页面为判别席、窗口样本、训练配置、封存结果、阈值与复核、研究留痕。PerformanceSummary、CurvePlot、RunTable等业务组件跨页复用；同时有共享表格、Badge、Notice、Empty。
+
+### 原始采样到窗口
+
+`services/windowing.py` 是纯函数，不含数据库与时钟；`services/rawdatasets.py` 负责分批入库与生成，`services/builds.py` 负责任务状态与核对预览。
+
+- **自然键**：`(管段, UTC 时刻)`。上传顺序与分批边界不影响结果：同值重传只计入去重，异值则整批拒绝（422），批内重复同理。
+- **窗口起点**：管段首个采样到末个采样之间每个 UTC 整分钟 S 都是候选起点，S 必须落在首末采样之间；窗口为左闭右开 `[S, S+5min)`。完全无采样的空窗口跳过；有采样但缺某一分钟的非空窗口保留并标为 `partial`，按实际采样聚合。
+- **聚合**：流量、声能、温度取算术均值；压力降取窗口内首压减尾压（有符号）；流量变异为总体标准差除以均值；管龄取窗口内最新采样的值；任一采样漏损则窗口 label=1。
+- **拒绝**：无时区（naive datetime）记录在 schema 层拒绝；窗口流量均值为零时无法定义变异，整次生成失败。非有限数值同样拒绝。
+- **原子性**：一个上传批次要么全写入要么全不写；生成任务先把窗口写入 staging 表（`GeneratedWindow`），全部成功后才创建一个 `WindowDataset`，训练只读取数据集列表，因此生成完成前窗口不进入训练，失败重试不留半批。
+- **内存**：单次生成额外工作内存上限 128 MB（`BuildInput.memory_limit_bytes`，16–128 MB）。采样行按 `(管段, 时刻)` 键序分块读取，窗口按时间前向扫描、只缓冲一个窗口的采样；每块行数由最坏情况并发副本数反推（`FACTOR`、`ROW_BYTES`），实际峰值随上限变化并在测试中断言。
+- **核对**：生成记录页列出状态、窗口/漏损数、partial 数、跳过空窗数、每批行数与峰值估算，并可分页读取 staging 或已封存数据集中的窗口逐条核对。
 
 允许六特征：night_flow（夜间流量L/s）、pressure_drop（有符号压力降kPa）、acoustic_energy（声学能量）、flow_variation（流量变异）、pipe_age（管龄年）、ambient_temp（环境温度°C）。label单独为0/1，API拒绝任何额外/缺失特征及把label作为入模特征。导入接受JSON窗口数组，100–5000行，每类至少20；reference批内唯一。没有CSV解析器，源文件名用于演示台账。
 
@@ -79,13 +92,15 @@ npm ci
 npm run dev
 ```
 
-目录：backend/src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}；backend/scripts/seed_demo.py；backend/migrations/；frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}。首次使用SQLAlchemy metadata建表，migrations内记结构，未配生产增量迁移工具。
+目录：backend/src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}；backend/scripts/seed_demo.py；backend/tests/；backend/migrations/；frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}。连接旧库时新增表由启动时的 metadata 建表补齐，但 `sensor_windows` 新增的两列需要按 migrations 注释中的 ALTER 手工执行一次。首次使用SQLAlchemy metadata建表，migrations内记结构，未配生产增量迁移工具。
 
-自然键插入确保seed可重复、不覆盖用户修改；只在没有基准研究时计算一次基准。RequestID和全局错误两个中间件提供可追踪请求；AuditLog保留登录、训练、策略和人工复核。CSV对公式前缀转义。共享枚举：backend/src/constants/enums.py的Role/RunStatus/PolicyStatus/Verdict，frontend/src/constants/enums.ts对应角色、运行/策略状态、复核标签；使用处为依赖鉴权、训练/策略/复核service/schema以及Badge/Layout/页面。全部测试脚本、截图、日志、CSV、结果报告位于批次根test-artifacts/gb-0008，不进入源码。
+自然键插入确保seed可重复、不覆盖用户修改；只在没有基准研究时计算一次基准。RequestID和全局错误两个中间件提供可追踪请求；AuditLog保留登录、训练、策略和人工复核。CSV对公式前缀转义。共享枚举：backend/src/constants/enums.py的Role/RunStatus/PolicyStatus/BuildStatus/Verdict，frontend/src/constants/enums.ts对应角色、运行/策略/生成状态、复核标签；使用处为依赖鉴权、训练/策略/复核/生成service/schema以及Badge/Layout/页面。全部测试脚本、截图、日志、CSV、结果报告位于批次根test-artifacts/gb-0008，不进入源码。
 
 ## 验收与边界
 
 真实验收结果与已知差异见批次根 `test-artifacts/gb-0008/TESTING.md`。独立小数据oracle验证已知阈值、AUC/AP与计数；训练折拟合追踪和测试标签翻转实验验证选择边界。API真实验证三角色与审批/导出保护；Playwright走训练→策略→审批→人工复核→获批导出。收尾使用 `docker compose down -v --remove-orphans` 删除本栈演示卷。
+
+原始采样部分的自动化测试在 `backend/tests/`：`python3 -m pytest tests`。`test_windowing.py` 用朴素 oracle（枚举每个起点、逐窗口扫描全部采样）对照生产代码的单次前向扫描，覆盖首末采样边界、左闭右开、空窗跳过、非空但缺分钟的 partial 窗口、六项聚合口径、零均值拒绝、无时区拒绝与偏移换算，并用随机乱序/不规则间隔数据（含 400 分钟长管段）做等价性校验。`test_rawdatasets.py` 覆盖同值去重、异值整批拒绝、失败重试不留半批、上传顺序与分批边界无关（两个数据集用不同乱序与批次切分得到逐窗口相同的窗口）、staging 不可训练、复制阶段中断整笔回滚、内存上限与每批行数。`test_raw_api.py` 覆盖角色权限、无时区 422、重传 409/422、内存上限 422、队列不可用 503、以及 worker 任务成功/失败路径。测试用 SQLite（`backend/tests/conftest.py`）作为快速替身，规则本身都在应用层执行，PostgreSQL 上行为一致；128 MB 峰值另以 `ru_maxrss` 实测（300k 采样生成 300k 窗口时额外内存低于上限）。
 
 ## License
 

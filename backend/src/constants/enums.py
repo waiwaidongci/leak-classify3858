@@ -12,6 +12,10 @@ class PolicyStatus(StrEnum):
  DRAFT='draft'
  APPROVED='approved'
  REJECTED='rejected'
+class BuildStatus(StrEnum):
+ RUNNING='running'
+ SUCCEEDED='succeeded'
+ FAILED='failed'
 class Verdict(StrEnum):
  PENDING='pending'
  CONFIRMED='confirmed'

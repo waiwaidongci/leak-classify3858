@@ -14,7 +14,7 @@ def get_windows(db,id,limit=None):
  if not db.get(WindowDataset,id): raise HTTPException(404,'数据集不存在')
  q=select(SensorWindow).where(SensorWindow.dataset_id==id).order_by(SensorWindow.reference)
  if limit:q=q.limit(limit)
- return [row(x) for x in db.scalars(q)]
+ return [dict(row(x),pipe_id=x.pipe_id,window_start=x.window_start.isoformat() if x.window_start else None) for x in db.scalars(q)]
 def create_dataset(db,data,user):
  if db.scalar(select(WindowDataset).where(WindowDataset.name==data.name)): raise HTTPException(409,'数据集名称已存在')
  refs=[x.reference for x in data.windows]
